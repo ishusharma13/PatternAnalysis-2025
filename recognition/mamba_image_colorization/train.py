@@ -95,9 +95,15 @@ def main():
         avg_psnr, avg_ssim, avg_ploss = validate(model, val_loader, p_loss_fn, device)
         print(f"Val PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f} | LPIPS: {avg_ploss:.4f}")
 
+        # Log metrics to CSV
+        log_metrics_to_csv(epoch+1, avg_loss, avg_psnr, avg_ssim, avg_ploss)
+
+        # Save checkpoint
         ckpt_path = os.path.join(save_dir, f"epoch{epoch+1}.pth")
         torch.save(model.state_dict(), ckpt_path)
-        print(" Saved:", ckpt_path)
+        print("Saved:", ckpt_path)
+
+       
 
 if __name__ == "__main__":
     main()
