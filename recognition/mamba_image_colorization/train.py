@@ -1,3 +1,4 @@
+import csv
 from metrics import psnr, ssim
 import lpips
 import torch
@@ -14,6 +15,15 @@ def save_val_image(tensor, fname, out_dir="./val_results"):
     os.makedirs(out_dir, exist_ok=True)
     img = to_pil_image(tensor.squeeze(0).clamp(0, 1))
     img.save(os.path.join(out_dir, fname))
+
+def log_metrics_to_csv(epoch, train_loss, psnr_score, ssim_score, lpips_score, filepath="./logs/metrics.csv"):
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    file_exists = os.path.isfile(filepath)
+    with open(filepath, mode="a", newline="") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["epoch", "train_loss", "psnr", "ssim", "lpips"])
+        writer.writerow([epoch, train_loss, psnr_score, ssim_score, lpips_score])
 
 def validate(model, loader, p_loss_fn, device):
     model.eval()
@@ -79,15 +89,15 @@ def main():
 
     for epoch in range(epochs):
         avg_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, p_loss_fn, device)
-        print(f"\n📌 Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_loss:.4f}")
+        print(f"\n Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_loss:.4f}")
 
         # Validation
         avg_psnr, avg_ssim, avg_ploss = validate(model, val_loader, p_loss_fn, device)
-        print(f"✅ Val PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f} | LPIPS: {avg_ploss:.4f}")
+        print(f"Val PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f} | LPIPS: {avg_ploss:.4f}")
 
         ckpt_path = os.path.join(save_dir, f"epoch{epoch+1}.pth")
         torch.save(model.state_dict(), ckpt_path)
-        print("💾 Saved:", ckpt_path)
+        print(" Saved:", ckpt_path)
 
 if __name__ == "__main__":
     main()
