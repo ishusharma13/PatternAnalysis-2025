@@ -1,6 +1,10 @@
 torch>=2.1.0
-torchvision
-tqdm
-Pillow
+torchvision>=0.16.0
 numpy
+Pillow
 opencv-python
+tqdm
+einops
+matplotlib
+scikit-image
+lpips
