@@ -8,3 +8,4 @@ einops
 matplotlib
 scikit-image
 lpips
+mamba_ssm
