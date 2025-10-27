@@ -1,3 +1,7 @@
+# train.py (final)
+import argparse
+import os
+import csv
 from metrics import psnr, ssim
 import lpips
 import torch
@@ -9,9 +13,6 @@ from tqdm import tqdm
 from dataset import PairedGrayColorDataset
 from modules import MambaColorizer
 from torchvision.transforms.functional import to_pil_image
-import argparse
-import os
-import csv
 
 def save_val_image(tensor, fname, out_dir="./val_results"):
     os.makedirs(out_dir, exist_ok=True)
@@ -43,9 +44,9 @@ def validate(model, loader, p_loss_fn, device):
             save_val_image(pred, fname)
 
     return (
-        sum(psnr_list) / len(psnr_list),
-        sum(ssim_list) / len(ssim_list),
-        sum(p_loss_list) / len(p_loss_list)
+        sum(psnr_list) / len(psnr_list) if psnr_list else 0,
+        sum(ssim_list) / len(ssim_list) if ssim_list else 0,
+        sum(p_loss_list) / len(p_loss_list) if p_loss_list else 0
     )
 
 def train_one_epoch(model, loader, optimizer, loss_fn, p_loss_fn, device):
@@ -64,65 +65,75 @@ def train_one_epoch(model, loader, optimizer, loss_fn, p_loss_fn, device):
         optimizer.step()
         total_loss += loss.item()
 
-    return total_loss / len(loader)
+    return total_loss / len(loader) if len(loader) else 0
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--local_rank", type=int, default=-1)
+    p.add_argument("--vendor", type=str, default="vim", choices=["vim","mambairv2","dummy"])
+    p.add_argument("--pretrained", action='store_true')
+    p.add_argument("--epochs", type=int, default=2)
+    p.add_argument("--bs", type=int, default=4)
+    p.add_argument("--size", type=int, default=128)
+    p.add_argument("--data", type=str, default="./data")
+    p.add_argument("--lr", type=float, default=1e-4)
+    return p.parse_args()
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=-1)
-    args = parser.parse_args()
-
-    data_path = "./data"
-    epochs = 2
-    batch_size = 4
-    lr = 1e-4
-    save_dir = "./checkpoints"
-    os.makedirs(save_dir, exist_ok=True)
-
+    args = parse_args()
     distributed = args.local_rank != -1
 
     if distributed:
-        dist.init_process_group(backend='nccl')
+        dist.init_process_group(backend="nccl")
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
-        if dist.get_rank() == 0:
-            print("🐍 Using Distributed Training with DDP")
     else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print("Using device:", device)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Device:", device, "Distributed:", distributed)
 
-    train_ds = PairedGrayColorDataset(data_path, split='train', size=128)
-    val_ds   = PairedGrayColorDataset(data_path, split='val', size=128, augment=False)
+    train_ds = PairedGrayColorDataset(args.data, split='train', size=args.size)
+    val_ds   = PairedGrayColorDataset(args.data, split='val', size=args.size, augment=False)
 
     if distributed:
         train_sampler = DistributedSampler(train_ds)
         val_sampler = DistributedSampler(val_ds, shuffle=False)
     else:
-        train_sampler, val_sampler = None, None
+        train_sampler = None
+        val_sampler = None
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=(train_sampler is None), sampler=train_sampler)
-    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False, sampler=val_sampler)
+    train_loader = DataLoader(train_ds, batch_size=args.bs, shuffle=(train_sampler is None), sampler=train_sampler, num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(val_ds, batch_size=1, shuffle=False, sampler=val_sampler, num_workers=2, pin_memory=True)
 
-    model = MambaColorizer().to(device)
-    
+    model = MambaColorizer(vendor=args.vendor, pretrained=args.pretrained).to(device)
     if distributed:
         model = DDP(model, device_ids=[args.local_rank])
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-6)
     loss_fn = nn.L1Loss()
     p_loss_fn = lpips.LPIPS(net='vgg').to(device)
 
-    for epoch in range(epochs):
-        avg_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, p_loss_fn, device)
+    os.makedirs("./checkpoints", exist_ok=True)
+    best_psnr = 0.0
 
+    for epoch in range(args.epochs):
+        if distributed and train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        avg_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, p_loss_fn, device)
         avg_psnr, avg_ssim, avg_ploss = validate(model, val_loader, p_loss_fn, device)
 
-        if not distributed or dist.get_rank() == 0:
-            print(f"\n📌 Epoch [{epoch+1}/{epochs}] - Train Loss: {avg_loss:.4f}")
-            print(f"✅ Val PSNR: {avg_psnr:.2f} dB | SSIM: {avg_ssim:.4f} | LPIPS: {avg_ploss:.4f}")
+        # only rank 0 logs and saves
+        if (not distributed) or (dist.get_rank() == 0):
+            print(f"\nEpoch [{epoch+1}/{args.epochs}] TrainLoss: {avg_loss:.4f} PSNR: {avg_psnr:.2f} SSIM: {avg_ssim:.4f} LPIPS: {avg_ploss:.4f}")
             log_metrics_to_csv(epoch+1, avg_loss, avg_psnr, avg_ssim, avg_ploss)
-            ckpt_path = os.path.join(save_dir, f"epoch{epoch+1}.pth")
-            torch.save(model.state_dict(), ckpt_path)
-            print("💾 Saved:", ckpt_path)
+            ckpt = {
+                "epoch": epoch+1,
+                "model_state": model.module.state_dict() if distributed else model.state_dict(),
+                "optim_state": optimizer.state_dict()
+            }
+            torch.save(ckpt, f"./checkpoints/ckpt_epoch{epoch+1}.pth")
+            if avg_psnr > best_psnr:
+                best_psnr = avg_psnr
+                torch.save(ckpt, "./checkpoints/best.pth")
 
 if __name__ == "__main__":
     main()
